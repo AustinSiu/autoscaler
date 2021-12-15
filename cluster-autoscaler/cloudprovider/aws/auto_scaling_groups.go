@@ -27,6 +27,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	klog "k8s.io/klog/v2"
 )
 
@@ -57,6 +58,8 @@ type launchTemplate struct {
 type mixedInstancesPolicy struct {
 	launchTemplate         *launchTemplate
 	instanceTypesOverrides []string
+	// instanceRequirementsOverrides *autoscaling.InstanceRequirements
+	instanceRequirementsOverrides *ec2.InstanceRequirements
 }
 
 type asg struct {
@@ -79,7 +82,7 @@ func newASGCache(awsService *awsWrapper, explicitSpecs []string, autoDiscoverySp
 		awsService:            awsService,
 		asgToInstances:        make(map[AwsRef][]AwsInstanceRef),
 		instanceToAsg:         make(map[AwsInstanceRef]*asg),
-		asgInstanceTypeCache:  newAsgInstanceTypeCache(awsService),
+		asgInstanceTypeCache:  newAsgInstanceTypeCache(awsService), // austin: an instance type is cached? is this based on template?
 		interrupt:             make(chan struct{}),
 		asgAutoDiscoverySpecs: autoDiscoverySpecs,
 		explicitlyConfigured:  make(map[AwsRef]bool),
@@ -94,10 +97,12 @@ func newASGCache(awsService *awsWrapper, explicitSpecs []string, autoDiscoverySp
 }
 
 // Use a function variable for ease of testing
-var getInstanceTypeForAsg = func(m *asgCache, group *asg) (string, error) {
-	if obj, found, _ := m.asgInstanceTypeCache.GetByKey(group.AwsRef.Name); found {
+var getInstanceTypeForAsg = func(m *asgCache, group *asg) (string, error) { // austin: this is where they try dedcide instance type for group somehow? wwhat does cache look like
+	if obj, found, _ := m.asgInstanceTypeCache.GetByKey(group.AwsRef.Name); found { // austin: does this interfere with checking asg instance requirements? when is this cache filled?
+		klog.V(4).Info("retrieve from cache")
 		return obj.(instanceTypeCachedObject).instanceType, nil
-	} else if result, err := m.awsService.getInstanceTypesForAsgs([]*asg{group}); err == nil {
+	} else if result, err := m.awsService.getInstanceTypesForAsgs([]*asg{group}); err == nil { // austin: does this func get called elsewhere, setting cache? edit: yes, in populate()
+		klog.V(4).Info("retrieve from api")
 		return result[group.AwsRef.Name], nil
 	}
 
@@ -483,17 +488,39 @@ func (m *asgCache) buildAsgFromAWS(g *autoscaling.Group) (*asg, error) {
 	}
 
 	if g.MixedInstancesPolicy != nil {
-		getInstanceTypes := func(data []*autoscaling.LaunchTemplateOverrides) []string {
-			res := make([]string, len(data))
-			for i := 0; i < len(data); i++ {
-				res[i] = aws.StringValue(data[i].InstanceType)
+		getInstanceTypes := func(overrides []*autoscaling.LaunchTemplateOverrides) []string {
+			res := []string{}
+			for _, override := range overrides {
+				if override.InstanceType != nil {
+					res = append(res, *override.InstanceType)
+				}
 			}
 			return res
 		}
 
+		// austinsi: brandon's trying to parse the requirements from asg and buuilding into internal asg view
+		// there is an ec2 LaunchTemplateOverrides
+		getInstanceTypeRequirements := func(overrides []*autoscaling.LaunchTemplateOverrides) *ec2.InstanceRequirements {
+			if len(overrides) == 1 && overrides[0].InstanceRequirements != nil {
+				// convert autoscaling version of requirements to ec2 bc idk...
+				ec2Requirement := ec2.InstanceRequirements{
+					// just mock one
+					VCpuCount: &ec2.VCpuCountRange{Min: aws.Int64(4), Max: aws.Int64(4)}, // hardcoding before having to do all the parsing for real
+					MemoryMiB: &ec2.MemoryMiB{Max: aws.Int64(10000), Min: aws.Int64(8000)},
+				}
+
+				klog.V(4).Info("An override was found!")
+				// return overrides[0].InstanceRequirements // likely not brandon's true attempt
+				return &ec2Requirement
+			}
+			klog.V(4).Info("No overrides found?")
+			return nil
+		}
+
 		asg.MixedInstancesPolicy = &mixedInstancesPolicy{
-			launchTemplate:         buildLaunchTemplateFromSpec(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification),
-			instanceTypesOverrides: getInstanceTypes(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
+			launchTemplate:                buildLaunchTemplateFromSpec(g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification),
+			instanceTypesOverrides:        getInstanceTypes(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
+			instanceRequirementsOverrides: getInstanceTypeRequirements(g.MixedInstancesPolicy.LaunchTemplate.Overrides),
 		}
 	}
 

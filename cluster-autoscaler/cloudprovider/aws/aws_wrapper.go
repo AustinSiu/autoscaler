@@ -41,6 +41,10 @@ type autoScalingI interface {
 // ec2I is the interface abstracting specific API calls of the EC2 service provided by AWS SDK for use in CA
 type ec2I interface {
 	DescribeLaunchTemplateVersions(input *ec2.DescribeLaunchTemplateVersionsInput) (*ec2.DescribeLaunchTemplateVersionsOutput, error)
+	// do i use GetInstanceTypesFromInstanceRequirementsInput or GetInstanceTypesFromInstanceRequirementsRequest or GetInstanceTypesFromInstanceRequirements...
+	// also shouldn't this input and output be defined by the underlaying api itself? check that
+	// should i use the pages version
+	GetInstanceTypesFromInstanceRequirements(input *ec2.GetInstanceTypesFromInstanceRequirementsInput) (*ec2.GetInstanceTypesFromInstanceRequirementsOutput, error)
 }
 
 // eksI is the interface that represents a specific aspect of EKS (Elastic Kubernetes Service) which is provided by AWS SDK for use in CA
@@ -256,7 +260,7 @@ func (m *awsWrapper) getInstanceTypeByLaunchTemplate(launchTemplate *launchTempl
 }
 
 func (m *awsWrapper) getInstanceTypesForAsgs(asgs []*asg) (map[string]string, error) {
-	results := map[string]string{}
+	results := map[string]string{} // austin: map of asg name to intended instance type
 	launchConfigsToQuery := map[string]string{}
 	launchTemplatesToQuery := map[string]*launchTemplate{}
 
@@ -268,8 +272,61 @@ func (m *awsWrapper) getInstanceTypesForAsgs(asgs []*asg) (map[string]string, er
 			launchTemplatesToQuery[name] = asg.LaunchTemplate
 		} else if asg.MixedInstancesPolicy != nil {
 			if len(asg.MixedInstancesPolicy.instanceTypesOverrides) > 0 {
-				results[name] = asg.MixedInstancesPolicy.instanceTypesOverrides[0]
+				// TODO(bwagner5): Sort to get smallest instance type rather than first
+				results[name] = asg.MixedInstancesPolicy.instanceTypesOverrides[0] // austin: add api call in this for loop to add to results based on requirements api call?
+				klog.V(4).Info("GOT TO MIXED OVERRIDES CASE")
+			} else if asg.MixedInstancesPolicy.instanceRequirementsOverrides != nil { // austin: is this being present and overrides present exclusive?
+				klog.V(4).Infof("GOT TO INSTANCE REQUIREMENTS CASE %v", asg.MixedInstancesPolicy.instanceRequirementsOverrides)
+				// var instanceNameFromAPI string
+				ec2InstanceRequirementsRequest := ec2.InstanceRequirementsRequest{
+					// AcceleratorCount:                          (*ec2.AcceleratorCountRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.AcceleratorCount),
+					// AcceleratorManufacturers:                  asg.MixedInstancesPolicy.instanceRequirementsOverrides.AcceleratorManufacturers,
+					// AcceleratorNames:                          asg.MixedInstancesPolicy.instanceRequirementsOverrides.AcceleratorNames,
+					// AcceleratorTotalMemoryMiB:                 (*ec2.AcceleratorTotalMemoryMiBRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.AcceleratorTotalMemoryMiB),
+					// AcceleratorTypes:                          asg.MixedInstancesPolicy.instanceRequirementsOverrides.AcceleratorTypes,
+					// BareMetal:                                 asg.MixedInstancesPolicy.instanceRequirementsOverrides.BareMetal,
+					// BaselineEbsBandwidthMbps:                  (*ec2.BaselineEbsBandwidthMbpsRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.BaselineEbsBandwidthMbps),
+					// BurstablePerformance:                      asg.MixedInstancesPolicy.instanceRequirementsOverrides.BurstablePerformance,
+					// CpuManufacturers:                          asg.MixedInstancesPolicy.instanceRequirementsOverrides.CpuManufacturers,
+					// ExcludedInstanceTypes:                     asg.MixedInstancesPolicy.instanceRequirementsOverrides.ExcludedInstanceTypes,
+					// InstanceGenerations:                       asg.MixedInstancesPolicy.instanceRequirementsOverrides.InstanceGenerations,
+					// LocalStorage:                              asg.MixedInstancesPolicy.instanceRequirementsOverrides.LocalStorage,
+					// LocalStorageTypes:                         asg.MixedInstancesPolicy.instanceRequirementsOverrides.LocalStorageTypes,
+					// MemoryGiBPerVCpu:                          (*ec2.MemoryGiBPerVCpuRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.MemoryGiBPerVCpu),
+					// MemoryMiB:                                 (*ec2.MemoryMiBRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.MemoryMiB),
+					// NetworkInterfaceCount:                     (*ec2.NetworkInterfaceCountRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.NetworkInterfaceCount),
+					// OnDemandMaxPricePercentageOverLowestPrice: asg.MixedInstancesPolicy.instanceRequirementsOverrides.OnDemandMaxPricePercentageOverLowestPrice,
+					// RequireHibernateSupport:                   asg.MixedInstancesPolicy.instanceRequirementsOverrides.RequireHibernateSupport,
+					// SpotMaxPricePercentageOverLowestPrice:     asg.MixedInstancesPolicy.instanceRequirementsOverrides.SpotMaxPricePercentageOverLowestPrice,
+					// TotalLocalStorageGB:                       (*ec2.TotalLocalStorageGBRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.TotalLocalStorageGB),
+					// VCpuCount:                                 (*ec2.VCpuCountRangeRequest)(asg.MixedInstancesPolicy.instanceRequirementsOverrides.VCpuCount),
+					VCpuCount: &ec2.VCpuCountRangeRequest{
+						Min: aws.Int64(4), Max: aws.Int64(4),
+					}, // hardcoding before having to do all the parsing for real
+					MemoryMiB: &ec2.MemoryMiBRequest{
+						Max: aws.Int64(10000), Min: aws.Int64(8000),
+					},
+				}
+				input := &ec2.GetInstanceTypesFromInstanceRequirementsInput{
+					ArchitectureTypes: []*string{aws.String("i386"), aws.String("x86_64"), aws.String("arm64"), aws.String("x86_64_mac")}, // figure out where to get this
+					// there has to be a more convenient way to get InstanceRequirementsRequest object from InstanceRequirements object...
+					InstanceRequirements: &ec2InstanceRequirementsRequest,
+					VirtualizationTypes:  []*string{aws.String("hvm"), aws.String("paravirtual")},
+				}
+				output, err := m.GetInstanceTypesFromInstanceRequirements(input) // should make this paginated
+				if err == nil {
+					// do something. fallback?
+					klog.Errorf("error while calling GetInstanceTypesFromInstanceRequirements: %s", err)
+				}
+				klog.V(4).Info(output)
+				klog.V(4).Info("Found following instance types:") // 12/13, we get here, but nothing in instancetypes bc bs input values sent
+				for instanceType := range output.InstanceTypes {
+					klog.V(4).Info(instanceType)
+				}
+
+				results[name] = "GOT TO INSTANCE REQUIREMENTS CASE" // austin: should prob replace this with api call result
 			} else {
+				// TODO: multiple launch templates (probably not important to support since in k8s you can't have multiple archs anyways with CA)?
 				launchTemplatesToQuery[name] = asg.MixedInstancesPolicy.launchTemplate
 			}
 		}
@@ -279,18 +336,19 @@ func (m *awsWrapper) getInstanceTypesForAsgs(asgs []*asg) (map[string]string, er
 	klog.V(4).Infof("%d launch templates to query", len(launchTemplatesToQuery))
 
 	// Query these all at once to minimize AWS API calls
+	// austin: this could be where we want to throw inn instance requireents names instead of instance type names? look here first 9/9
 	launchConfigNames := make([]*string, 0, len(launchConfigsToQuery))
 	for _, cfgName := range launchConfigsToQuery {
 		launchConfigNames = append(launchConfigNames, aws.String(cfgName))
 	}
-	launchConfigs, err := m.getInstanceTypeByLaunchConfigNames(launchConfigNames)
+	launchConfigsToInstanceTypes, err := m.getInstanceTypeByLaunchConfigNames(launchConfigNames) // austin: not launch configs, but launch config to instance type map
 	if err != nil {
 		klog.Errorf("Failed to query %d launch configurations", len(launchConfigsToQuery))
 		return nil, err
 	}
 
 	for asgName, cfgName := range launchConfigsToQuery {
-		results[asgName] = launchConfigs[cfgName]
+		results[asgName] = launchConfigsToInstanceTypes[cfgName]
 	}
 	klog.V(4).Infof("Successfully queried %d launch configurations", len(launchConfigsToQuery))
 
@@ -305,7 +363,8 @@ func (m *awsWrapper) getInstanceTypesForAsgs(asgs []*asg) (map[string]string, er
 	}
 	klog.V(4).Infof("Successfully queried %d launch templates", len(launchTemplatesToQuery))
 
-	return results, nil
+	klog.V(4).Infof("BASE INSTANCE TYPES FOR ASGS: %v", results) // brandon
+	return results, nil                                          // austin: combo of instance types from mixedinstancespolicy overrides, launch templates, and launch configs
 }
 
 func buildLaunchTemplateFromSpec(ltSpec *autoscaling.LaunchTemplateSpecification) *launchTemplate {

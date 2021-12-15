@@ -67,7 +67,7 @@ type AwsManager struct {
 }
 
 type asgTemplate struct {
-	InstanceType *InstanceType
+	InstanceType *InstanceType // austin: should this be updated to also accomodate instance requirements as alternative?
 	Region       string
 	Zone         string
 	Tags         []*autoscaling.TagDescription
@@ -313,12 +313,14 @@ func (m *AwsManager) getAsgTemplate(asg *asg) (*asgTemplate, error) {
 		klog.V(4).Infof("Found multiple availability zones for ASG %q; using %s for %s label\n", asg.Name, az, apiv1.LabelZoneFailureDomain)
 	}
 
-	instanceTypeName, err := getInstanceTypeForAsg(m.asgCache, asg)
+	instanceTypeName, err := getInstanceTypeForAsg(m.asgCache, asg) // austin: what instance type for an asg is this? big question
 	if err != nil {
 		return nil, err
 	}
 
-	if t, ok := m.instanceTypes[instanceTypeName]; ok {
+	klog.V(4).Infof("GOT INSTANCE TYPE %s for ASG %s", instanceTypeName, asg.Name)
+
+	if t, ok := m.instanceTypes[instanceTypeName]; ok { // austin: instance type for an asg gotten above, whats this list it's beeing referenced against? the one i touched? edit; yes, GenerateEC2InstanceTypes
 		return &asgTemplate{
 			InstanceType: t,
 			Region:       region,
@@ -326,6 +328,9 @@ func (m *AwsManager) getAsgTemplate(asg *asg) (*asgTemplate, error) {
 			Tags:         asg.Tags,
 		}, nil
 	}
+
+	// TODO(bwagner5): we hit this error!
+	// austin: ...but why
 	return nil, fmt.Errorf("ASG %q uses the unknown EC2 instance type %q", asg.Name, instanceTypeName)
 }
 
@@ -375,7 +380,7 @@ func (m *AwsManager) GetAsgOptions(asg asg, defaults config.NodeGroupAutoscaling
 	return &defaults
 }
 
-func (m *AwsManager) buildNodeFromTemplate(asg *asg, template *asgTemplate) (*apiv1.Node, error) {
+func (m *AwsManager) buildNodeFromTemplate(asg *asg, template *asgTemplate) (*apiv1.Node, error) { // shouldnt this method sig use name string instead of asg
 	node := apiv1.Node{}
 	nodeName := fmt.Sprintf("%s-asg-%d", asg.Name, rand.Int63())
 
@@ -395,8 +400,28 @@ func (m *AwsManager) buildNodeFromTemplate(asg *asg, template *asgTemplate) (*ap
 	node.Status.Capacity[gpu.ResourceNvidiaGPU] = *resource.NewQuantity(template.InstanceType.GPU, resource.DecimalSI)
 	node.Status.Capacity[apiv1.ResourceMemory] = *resource.NewQuantity(template.InstanceType.MemoryMb*1024*1024, resource.DecimalSI)
 
-	resourcesFromTags := extractAllocatableResourcesFromAsg(template.Tags)
+	// austin: below looks like Brandon checks for availability of instacerequirements, then overrides values to be requested above. maybe we should move the requirements to the template?
+	// TODO(bwagner5): This should work
+	klog.V(4).Info("About to parse asg for overrides")
+	if asg.MixedInstancesPolicy != nil && asg.MixedInstancesPolicy.instanceRequirementsOverrides != nil {
+		klog.V(4).Info("overrides found possibly")
+		instanceReqirements := asg.MixedInstancesPolicy.instanceRequirementsOverrides
+
+		if instanceReqirements.VCpuCount != nil {
+			if instanceReqirements.VCpuCount.Min != nil {
+				node.Status.Capacity[apiv1.ResourceCPU] = *resource.NewQuantity(*instanceReqirements.VCpuCount.Min, resource.DecimalSI)
+			}
+		}
+		if instanceReqirements.MemoryMiB != nil {
+			if instanceReqirements.MemoryMiB.Min != nil {
+				node.Status.Capacity[apiv1.ResourceCPU] = *resource.NewQuantity(*instanceReqirements.MemoryMiB.Min*1024*1024, resource.DecimalSI)
+			}
+		}
+	}
+
+	resourcesFromTags := extractAllocatableResourcesFromAsg(template.Tags) // austin: idk what this does
 	for resourceName, val := range resourcesFromTags {
+		klog.V(6).Infof("banana Extracting resource from ASG tag: %v -> %v", resourceName, *val) // Brandon
 		node.Status.Capacity[apiv1.ResourceName(resourceName)] = *val
 	}
 

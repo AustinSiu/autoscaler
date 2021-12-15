@@ -84,7 +84,7 @@ func (c *jitterClock) Since(ts time.Time) time.Duration {
 	return since
 }
 
-func (es instanceTypeExpirationStore) populate(autoscalingGroups []*asg) error {
+func (es instanceTypeExpirationStore) populate(autoscalingGroups []*asg) error { // austin: i think this is run first? to populate cache? to verify when this is run
 	asgsToQuery := []*asg{}
 
 	if c, ok := es.jitterClock.(*jitterClock); ok {
@@ -113,7 +113,7 @@ func (es instanceTypeExpirationStore) populate(autoscalingGroups []*asg) error {
 	// List expires old entries
 	_ = es.List()
 
-	instanceTypesByAsg, err := es.awsService.getInstanceTypesForAsgs(asgsToQuery)
+	instanceTypesByAsg, err := es.awsService.getInstanceTypesForAsgs(asgsToQuery) // austin: and this is where the instance type is set per asg?
 	if err != nil {
 		return err
 	}

@@ -326,9 +326,11 @@ func (ng *AwsNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 }
 
 // TemplateNodeInfo returns a node template for this node group.
+// TODO: This func appears to never be used... OR might be used when scale to 0 is enabled, yep - brandon
 func (ng *AwsNodeGroup) TemplateNodeInfo() (*schedulerframework.NodeInfo, error) {
 	template, err := ng.awsManager.getAsgTemplate(ng.asg)
 	if err != nil {
+		klog.V(5).Infoln("banana ERRing OUT SINCE getAsgTemplate( errd")
 		return nil, err
 	}
 
@@ -336,6 +338,8 @@ func (ng *AwsNodeGroup) TemplateNodeInfo() (*schedulerframework.NodeInfo, error)
 	if err != nil {
 		return nil, err
 	}
+
+	klog.V(5).Infof("GOT NODE (banana): %+v", node)
 
 	nodeInfo := schedulerframework.NewNodeInfo(cloudprovider.BuildKubeProxy(ng.asg.Name))
 	nodeInfo.SetNode(node)
